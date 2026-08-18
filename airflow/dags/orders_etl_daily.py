@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import os
+import socket
 import re
 import time
 from datetime import datetime, timedelta
@@ -41,6 +42,7 @@ DEFAULT_INGRESS_SUFFIX = "okdp.sandbox"
 DEFAULT_S3_BUCKET = "airflow-logs"
 DEFAULT_S3_INPUT_PREFIX = "orders/raw"
 DEFAULT_S3_OUTPUT_PREFIX = "orders/curated"
+S3_SERVICE_PORT = 8333
 S3_ENDPOINT_ENV_VAR = "AIRFLOW_ETL_S3_ENDPOINT"
 S3_BUCKET_ENV_VAR = "AIRFLOW_ETL_S3_BUCKET"
 S3_INPUT_PREFIX_ENV_VAR = "AIRFLOW_ETL_S3_INPUT_PREFIX"
@@ -83,19 +85,31 @@ def _discover_seaweedfs_s3_endpoint(core_api: client.CoreV1Api) -> str:
     if env_endpoint:
         return env_endpoint
 
-    # Prefer in-cluster SeaweedFS S3 service when available.
+    # Prefer the in-cluster S3 service. It may carry any release name and live
+    # in a namespace of its own, so names are gathered where listing services
+    # is granted, then probed on the S3 port.
+    candidates = []
     try:
-        services = core_api.list_namespaced_service(namespace=NAMESPACE).items
-        candidates = []
-        for svc in services:
-            service_name = (svc.metadata.name or "").strip()
-            if re.match(r"^seaweedfs-[a-z0-9-]+-s3$", service_name):
-                candidates.append(service_name)
-        if candidates:
-            chosen = sorted(candidates)[0]
-            return f"http://{chosen}.{NAMESPACE}.svc.cluster.local:8333"
+        for svc in core_api.list_namespaced_service(namespace=NAMESPACE).items:
+            for port in svc.spec.ports or []:
+                if port.port == S3_SERVICE_PORT:
+                    candidates.append(f"{svc.metadata.name}.{NAMESPACE}.svc.cluster.local")
+                    break
     except ApiException:
         pass
+    candidates.extend(
+        f"{name}.{namespace}.svc.cluster.local"
+        for namespace in ("default", NAMESPACE)
+        for name in ("storage-s3", "seaweedfs-s3")
+    )
+    # The store may live in another namespace, where listing services is not
+    # granted. Candidate hosts are probed by opening the S3 port instead.
+    for host in candidates:
+        try:
+            with socket.create_connection((host, S3_SERVICE_PORT), timeout=2):
+                return f"http://{host}:{S3_SERVICE_PORT}"
+        except OSError:
+            continue
 
     ingress_suffix = os.getenv(INGRESS_SUFFIX_ENV_VAR, DEFAULT_INGRESS_SUFFIX).strip()
     if not ingress_suffix:
