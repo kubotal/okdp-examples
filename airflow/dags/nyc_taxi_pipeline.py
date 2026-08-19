@@ -218,5 +218,5 @@ with DAG(
     run_etl = PythonOperator(
         task_id="submit_and_wait_nyc_taxi_etl",
         python_callable=submit_and_wait_nyc_taxi_etl,
-        op_kwargs={"run_suffix": "{{ ts_nodash | lower }}"},
+        op_kwargs={"run_suffix": "{{ (ts_nodash if ts_nodash is defined else macros.datetime.now().strftime('%Y%m%dT%H%M%S')) | lower }}"},
     )

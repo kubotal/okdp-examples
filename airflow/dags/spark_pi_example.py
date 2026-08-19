@@ -127,5 +127,5 @@ with DAG(
     run_spark_pi = PythonOperator(
         task_id="submit_and_wait_spark_pi",
         python_callable=submit_and_wait_spark_pi,
-        op_kwargs={"app_name": "spark-pi-{{ ts_nodash | lower }}"},
+        op_kwargs={"app_name": "spark-pi-{{ (ts_nodash if ts_nodash is defined else macros.datetime.now().strftime('%Y%m%dT%H%M%S')) | lower }}"},
     )
