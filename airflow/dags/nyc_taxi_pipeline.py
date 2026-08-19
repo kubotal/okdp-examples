@@ -3,10 +3,13 @@ NYC Taxi Pipeline - Airflow + Spark Operator
 Uses the Kubernetes Python API to submit a SparkApplication.
 """
 import os
-import socket
 import re
+import socket
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
+
+import yaml
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
@@ -37,8 +40,10 @@ SCRIPT_MOUNT_DIR = "/opt/spark/app"
 SCRIPT_FILE_NAME = "nyc_taxi_etl.py"
 
 # Input/Output S3
-S3_INPUT = "s3a://okdp/examples/data/raw/tripdata/yellow/"
-S3_OUTPUT_BASE = "s3a://okdp/examples/data/processed/nyc_taxi/yellow"
+# The medallion layout the rest of the examples use: raw parquet lands in
+# bronze, this aggregate is a business-ready output and belongs in gold.
+S3_INPUT = os.getenv("NYC_TAXI_S3_INPUT", "s3a://bronze/mobility/nyc_tlc/yellow/")
+S3_OUTPUT_BASE = os.getenv("NYC_TAXI_S3_OUTPUT", "s3a://gold/mobility/nyc_tlc/yellow")
 
 default_args = {
     "owner": "data-team",
@@ -106,11 +111,30 @@ def _delete_if_exists(custom_api, app_name):
             raise
 
 
+def _ensure_etl_code_configmap(core_api):
+    """Publish the job source next to the DAG, so nothing else has to deploy it."""
+    script_path = Path(__file__).resolve().parent.parent / "manifests" / "nyc-taxi-etl-configmap.yaml"
+    body = {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {"name": CONFIGMAP_NAME, "namespace": NAMESPACE},
+        "data": {SCRIPT_FILE_NAME: yaml.safe_load(script_path.read_text())["data"][SCRIPT_FILE_NAME]},
+    }
+    try:
+        core_api.create_namespaced_config_map(namespace=NAMESPACE, body=body)
+    except ApiException as exc:
+        if exc.status != 409:
+            raise
+        core_api.replace_namespaced_config_map(name=CONFIGMAP_NAME, namespace=NAMESPACE, body=body)
+
+
 def submit_and_wait_nyc_taxi_etl(run_suffix, timeout_seconds=1200):
     """Submit SparkApplication and wait for completion."""
     config.load_incluster_config()
     core_api = client.CoreV1Api()
     custom_api = client.CustomObjectsApi()
+
+    _ensure_etl_code_configmap(core_api)
 
     app_name = _safe_name("nyc-taxi-etl", run_suffix)
     s3_endpoint = _discover_s3_endpoint(core_api)
